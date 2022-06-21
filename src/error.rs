@@ -2,13 +2,14 @@ use std;
 use std::fmt::Debug;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Error {
     message: String,
     source_error: Option<Box<dyn std::error::Error>>
 }
 
 impl Error {
-    fn new<S: ToString>(message: S) -> Self {
+    pub fn new<S: ToString>(message: S) -> Self {
         Error {
             message: message.to_string(),
             source_error: None,
