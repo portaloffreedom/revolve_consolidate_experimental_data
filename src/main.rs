@@ -6,30 +6,33 @@ extern crate serde_yaml;
 extern crate yaml_rust;
 
 pub mod iterators;
+pub mod error;
 
 use iterators::IdentifyLast;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::prelude::*;
-use std::{collections::HashMap, error, fs, io, path::Path};
+use std::{collections::HashMap, fs, io, path::Path};
+use std::ops::Range;
+use error::{Error, ConvertResult};
 
 const PANDAS_NULL: &str = "NA";
 
-const DIR_PATH: &str = "data";
+const DIR_PATH: &str = "/home/matteo/projects/revolve/experiments/isaac/data";
 const EXPERIMENT_TYPES: &[&str] = &[
-    // "Experiment_A",
-    "Experiment_B",
-    // "Experiment_C",
-    // "Experiment_D",
-    // "Experiment_E",
+    "base_prog",
+    "base_rnd",
+    "cosit_prog",
+    "cosit_rnd",
 ];
 
-const RUNS: &[u16] = &[
+const RUNS: Range<u16> = 1..159;
+// const RUNS: &[u16] = &[
     // 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    1, 2, 5, 6, 7, 9, 10, 11, 12, 14, 15
-    //3, 9,
-    // 2,3,4,5,6,7,8,10
-];
+    // 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    // 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+    // 31, 32, 33, 34, 35, 36, 37, 38,
+// ];
 
 const BEHAVIOURAL_MEASURES: &[&str] = &[
     "velocity",
@@ -105,22 +108,22 @@ fn generate_all_measures<P: AsRef<Path>>(
     run_path: &P,
     id_gen_species_map: &HashMap<u64, Vec<(u64, u64)>>,
     phylogeny: &HashMap<u64, Vec<u64>>,
-) {
-    let mut file_summary = open_file_with_headers(run_path).expect("could not open file_summary");
+) -> Result<(), Error> {
+    let mut file_summary = open_file_with_headers(run_path).into_error("could not open file_summary")?;
 
     let phylogeny_filepath = run_path
         .as_ref()
         .join("data_fullevolution")
         .join("filogeny.tsv");
     let mut phylogeny_file =
-        fs::File::create(phylogeny_filepath).expect("could not create filogeny file");
+        fs::File::create(phylogeny_filepath).into_error("Cound not create finlogeny file")?;
 
     let fitness_filepath = run_path
         .as_ref()
         .join("data_fullevolution")
         .join("fitness.csv");
     let fitness_file =
-        io::BufReader::new(fs::File::open(fitness_filepath).expect("could not open fitness file"));
+        io::BufReader::new(fs::File::open(fitness_filepath).into_error("could not open fitness file")?);
 
     fitness_file
         .lines()
@@ -299,6 +302,8 @@ fn generate_all_measures<P: AsRef<Path>>(
                 writeln!(&mut file_summary).unwrap();
             },
         );
+
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,9 +321,11 @@ struct Species {
 }
 
 impl Species {
-    pub fn parse_from_file<P: AsRef<Path>>(path: &P) -> Result<Self, Box<dyn error::Error>> {
-        let species_str = load_yaml_to_str(path)?;
-        let species: Self = serde_yaml::from_str(&species_str)?;
+    pub fn parse_from_file<P: AsRef<Path>>(path: &P) -> Result<Self, Error> {
+        let species_str = load_yaml_to_str(path)
+            .into_error("read yaml file failed")?;
+        let species: Self = serde_yaml::from_str(&species_str)
+            .into_error("parse yaml file failed")?;
         Ok(species)
     }
 }
@@ -438,13 +445,11 @@ fn generate_shaphot_ids_generations_species<P: AsRef<Path>>(run_path: &P) -> Has
     generated_ids_map
 }
 
-fn load_phylogeny<P: AsRef<Path>>(path: &P) -> HashMap<u64, Vec<u64>> {
+fn load_phylogeny<P: AsRef<Path>>(path: &P) -> Result<HashMap<u64, Vec<u64>>, Error> {
     let phylogeny_folder = path.as_ref().join("data_fullevolution").join("phylogeny");
 
-    let dir_reader = match fs::read_dir(&phylogeny_folder) {
-        Ok(dir_reader) => dir_reader,
-        Err(error) => panic!("Could not open phylogeny folder ({}): {}", phylogeny_folder.display(), error),
-    };
+    let dir_reader = fs::read_dir(&phylogeny_folder)
+        .into_error(format!("Could not open phylogeny folder ({})", phylogeny_folder.display()))?;
 
     dir_reader.filter_map(|phylogeny_file| {
             let phylogeny_file = phylogeny_file.unwrap();
@@ -464,38 +469,52 @@ fn load_phylogeny<P: AsRef<Path>>(path: &P) -> HashMap<u64, Vec<u64>> {
             }
         })
         .map(|(robot_id, phylogeny_file)| {
-            let robot_phylogeny_str = load_yaml_to_str(&phylogeny_file.path())
+            let mut robot_phylogeny_str = load_yaml_to_str(&phylogeny_file.path())
                 .expect("could not read phylogeny file for individual");
+            robot_phylogeny_str += "\n";
             use yaml_rust::{Yaml, YamlLoader};
-            let robot_phylogeny = YamlLoader::load_from_str(&robot_phylogeny_str).unwrap();
-            let parents: Vec<u64> = match &robot_phylogeny[0]["parents"] {
-                Yaml::Array(array) => array
-                    .iter()
-                    .map(|node| node.as_i64().unwrap() as u64)
-                    .collect(),
-                Yaml::Null => Vec::new(),
-                Yaml::Real(_) => panic!("phylogeny parents yaml parse error: Real"),
-                Yaml::Integer(single_parent) => vec![*single_parent as u64],
-                Yaml::String(text) => text.split(",").map(|v| v.parse().unwrap()).collect(),
-                Yaml::Boolean(_) => panic!("phylogeny parents yaml parse error: Boolean"),
-                Yaml::Hash(_) => panic!("phylogeny parents yaml parse error: Hash"),
-                Yaml::Alias(_) => panic!("phylogeny parents yaml parse error: Alias"),
-                Yaml::BadValue => panic!("phylogeny parents yaml parse error: BadValue"),
+            let parents = if robot_phylogeny_str == "parents: null\n" {
+                Vec::<u64>::new()
+            } else {
+                let robot_phylogeny = YamlLoader::load_from_str(&robot_phylogeny_str)
+                    .into_error("Error loading yaml from string")?;
+                let parents: Vec<u64> = match &robot_phylogeny[0]["parents"] {
+                    Yaml::Array(array) => array
+                        .iter()
+                        .map(|node| node.as_i64().unwrap() as u64)
+                        .collect(),
+                    Yaml::Null => Vec::new(),
+                    Yaml::Real(_) => panic!("phylogeny parents yaml parse error: Real"),
+                    Yaml::Integer(single_parent) => vec![*single_parent as u64],
+                    Yaml::String(text) => text.split(",").map(|v| v.parse().unwrap()).collect(),
+                    Yaml::Boolean(_) => panic!("phylogeny parents yaml parse error: Boolean"),
+                    Yaml::Hash(_) => panic!("phylogeny parents yaml parse error: Hash"),
+                    Yaml::Alias(_) => panic!("phylogeny parents yaml parse error: Alias"),
+                    Yaml::BadValue => panic!("phylogeny parents yaml parse error: BadValue"),
+                };
+                parents
             };
 
-            (robot_id, parents)
+            Ok((robot_id, parents))
         })
         .collect()
+}
+
+fn analyze(exp: &str, run: u16) -> Result<(), Error> {
+    print!("Consilidating {}, run {} ... ", exp, run);
+    let run_path = Path::new(DIR_PATH).join(exp).join(run.to_string());
+    let phylogeny = load_phylogeny(&run_path)?;
+    let id_gen_species_map = generate_shaphot_ids(&run_path);
+    generate_all_measures(&run_path, &id_gen_species_map, &phylogeny)
 }
 
 fn main() {
     for exp in EXPERIMENT_TYPES {
         for run in RUNS {
-            println!("Consilidating {}, run {}", exp, run);
-            let run_path = Path::new(DIR_PATH).join(exp).join(run.to_string());
-            let phylogeny = load_phylogeny(&run_path);
-            let id_gen_species_map = generate_shaphot_ids(&run_path);
-            generate_all_measures(&run_path, &id_gen_species_map, &phylogeny);
+            let r = analyze(exp, run);
+            if r.is_err() {
+                println!("{}:{} failed because {:?}", exp, run, r);
+            }
         }
     }
 }
