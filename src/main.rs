@@ -7,6 +7,7 @@ extern crate yaml_rust;
 
 pub mod iterators;
 pub mod error;
+pub mod data;
 
 use iterators::IdentifyLast;
 use regex::Regex;
@@ -14,16 +15,22 @@ use serde::{Deserialize, Serialize};
 use std::io::prelude::*;
 use std::{collections::HashMap, fs, io, path::Path};
 use std::ops::Range;
+use lazy_static::initialize;
 use error::{Error, ConvertResult};
+use crate::data::vector::Vector2;
+use threadpool::ThreadPool;
 
 const PANDAS_NULL: &str = "NA";
 
 const DIR_PATH: &str = "/home/matteo/projects/revolve/experiments/isaac/data";
 const EXPERIMENT_TYPES: &[&str] = &[
+    "base_test",
+    "base_test_120s",
     "base_prog",
     "base_rnd",
     "cosit_prog",
     "cosit_rnd",
+    "cosit_rnd_zdepth",
 ];
 
 const RUNS: Range<u16> = 1..159;
@@ -106,7 +113,7 @@ fn load_yaml_to_str<P: AsRef<Path>>(path: &P) -> io::Result<String> {
 
 fn generate_all_measures<P: AsRef<Path>>(
     run_path: &P,
-    id_gen_species_map: &HashMap<u64, Vec<(u64, u64)>>,
+    id_gen_species_map: &HashMap<u64, (Vec<(u64, u64)>, Option<CosituatedData>)>,
     phylogeny: &HashMap<u64, Vec<u64>>,
 ) -> Result<(), Error> {
     let mut file_summary = open_file_with_headers(run_path).into_error("could not open file_summary")?;
@@ -138,18 +145,19 @@ fn generate_all_measures<P: AsRef<Path>>(
         .flat_map(move |(robot_id, fitness)| {
             // replicate line for each gen and species id found
             lazy_static! {
-                static ref DEFAULT_VALUE: Vec<(Option<u64>, Option<u64>)> = vec![(None, None)];
+                static ref DEFAULT_VALUE: (Vec<(Option<u64>, Option<u64>)>, Option<CosituatedData>) = (vec![(None, None)], None);
             }
             id_gen_species_map
                 .get(&robot_id)
-                .map(move |slice| {
-                    slice
+                .map(move |(slice, cosituated_data)| {
+                    (slice
                         .iter()
                         .map(|(generation, species)| (Some(*generation), Some(*species)))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>(), cosituated_data)
                 })
+                .map(|(slice, cosituated_data)| slice) //ignoring cosituated data for now
                 .as_ref()
-                .unwrap_or(&DEFAULT_VALUE)
+                .unwrap_or(&DEFAULT_VALUE.0)
                 .iter()
                 .map(move |(generation, species)| {
                     (robot_id, generation.clone(), species.clone(), fitness)
@@ -173,6 +181,12 @@ fn generate_all_measures<P: AsRef<Path>>(
                 )
             },
         )
+        // Add extra cosituated data
+        .map(|(robot_id, generation, species_id, fitness, n_parents, parent1, parent2)| {
+            // let () = generate_shaphot_ids.get(&robot_id)
+            //     .map(|| ());
+            (robot_id, generation, species_id, fitness, n_parents, parent1, parent2)
+        })
         .for_each(
             |(robot_id, generation, species_id, fitness, n_parents, parent1, parent2)| {
                 // WRITE ID + GENERATION + SPECIES_ID + FITNESS + N_PARENTS + PARENT_1 + PARENT_2
@@ -330,7 +344,7 @@ impl Species {
     }
 }
 
-fn generate_shaphot_ids<P: AsRef<Path>>(run_path: &P) -> HashMap<u64, Vec<(u64, u64)>> {
+fn generate_shaphot_ids<P: AsRef<Path>>(run_path: &P) -> HashMap<u64, (Vec<(u64, u64)>, Option<CosituatedData>)> {
     // Generation, robot_id
     println!(
         "Generating snaphost_ids for {}",
@@ -346,17 +360,20 @@ fn generate_shaphot_ids<P: AsRef<Path>>(run_path: &P) -> HashMap<u64, Vec<(u64, 
 
     let generations_path = run_path.as_ref().join("generations");
     //TODO return optional species
-    let mut generated_ids_map: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+    let mut generated_ids_map: HashMap<u64, (Vec<(u64, u64)>, Option<CosituatedData>)> = HashMap::new();
 
     for path in fs::read_dir(&generations_path).unwrap() {
         let path = path.unwrap();
         let filename = path.file_name();
-        let filename = filename.to_str().unwrap_or("");
-        if let Some(gen_num_str) = GENERATION_REGEX.captures(filename) {
+        let generation_folder_name = filename.to_str().unwrap_or("");
+        if let Some(gen_num_str) = GENERATION_REGEX.captures(generation_folder_name) {
             let captured_str = &gen_num_str[1]; // 0 is the whole string, 1 is the first match
             let gen_num = captured_str.parse::<u64>().unwrap();
 
-            let ids_filename = generations_path.join(filename).join("identifiers.txt");
+            let generation_path = generations_path.join(generation_folder_name);
+            let ids_filename = generation_path.join("identifiers.txt");
+            let extra_filename = generation_path.join("extra.tsv");
+            let extra_data = load_extra_cosituated_data(extra_filename);
             let file = fs::File::open(ids_filename)
                 .expect("Could not open identifiers.txt file");
 
@@ -365,6 +382,7 @@ fn generate_shaphot_ids<P: AsRef<Path>>(run_path: &P) -> HashMap<u64, Vec<(u64, 
                 generated_ids_map
                     .entry(individual_id)
                     .or_default()
+                    .0
                     .push((gen_num, 0));
                 write!(
                     &mut ids_file,
@@ -374,7 +392,7 @@ fn generate_shaphot_ids<P: AsRef<Path>>(run_path: &P) -> HashMap<u64, Vec<(u64, 
                     .unwrap();
             }
         } else {
-            println!("unread folder {}", filename);
+            println!("unread folder {}", generation_folder_name);
         }
     }
 
@@ -445,6 +463,32 @@ fn generate_shaphot_ids_generations_species<P: AsRef<Path>>(run_path: &P) -> Has
     generated_ids_map
 }
 
+struct CosituatedData {
+    pub initial_position: Vector2<f64>,
+    pub final_position: Vector2<f64>,
+    pub candidate_best: (usize, f64),
+    pub candidates: Vec<(usize, f64)>,
+}
+
+fn load_extra_cosituated_data<P: AsRef<Path>>(filename: P) -> Result<HashMap<u64, CosituatedData>, Error>
+{
+    let file = fs::File::open(filename).into_error("couldn't open extra file")?;
+    io::BufReader::new(file).lines().map(|line|{
+        let line = line.into_error("Reading line error")?;
+        let mut split = line.split('\t');
+        let id = split.next().unwrap().parse::<u64>().into_error("parsing robot id error")?;
+        let initial_position = Vector2::parse_from_python(split.next().unwrap())?;
+        let final_position = Vector2::parse_from_python(split.next().unwrap())?;
+        Ok((id, CosituatedData {
+            initial_position,
+            final_position,
+            candidate_best: (0, 0.0),
+            candidates: Vec::new(),
+        }))
+    }).collect()
+}
+
+
 fn load_phylogeny<P: AsRef<Path>>(path: &P) -> Result<HashMap<u64, Vec<u64>>, Error> {
     let phylogeny_folder = path.as_ref().join("data_fullevolution").join("phylogeny");
 
@@ -501,7 +545,7 @@ fn load_phylogeny<P: AsRef<Path>>(path: &P) -> Result<HashMap<u64, Vec<u64>>, Er
 }
 
 fn analyze(exp: &str, run: u16) -> Result<(), Error> {
-    print!("Consilidating {}, run {} ... ", exp, run);
+    println!("Consilidating {}, run {} ... ", exp, run);
     let run_path = Path::new(DIR_PATH).join(exp).join(run.to_string());
     let phylogeny = load_phylogeny(&run_path)?;
     let id_gen_species_map = generate_shaphot_ids(&run_path);
@@ -509,12 +553,19 @@ fn analyze(exp: &str, run: u16) -> Result<(), Error> {
 }
 
 fn main() {
+    let n_workers = num_cpus::get();
+    let pool = ThreadPool::new(n_workers);
+
     for exp in EXPERIMENT_TYPES {
         for run in RUNS {
-            let r = analyze(exp, run);
-            if r.is_err() {
-                println!("{}:{} failed because {:?}", exp, run, r);
-            }
+            pool.execute(move || {
+                let r = analyze(exp, run);
+                if r.is_err() {
+                    println!("{}:{} failed because {:?}", exp, run, r);
+                }
+            });
         }
     }
+
+    pool.join();
 }
