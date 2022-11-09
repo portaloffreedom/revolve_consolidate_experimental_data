@@ -4,8 +4,8 @@ use std::fmt::Debug;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Error {
-    message: String,
-    source_error: Option<Box<dyn std::error::Error>>
+    pub message: String,
+    pub source_error: Option<Box<dyn std::error::Error>>
 }
 
 impl Error {
