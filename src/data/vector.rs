@@ -1,11 +1,13 @@
 use regex::Regex;
 use crate::error::{ConvertError, ConvertResult, Error};
 
+#[derive(Default, Copy, Clone, Debug)]
 pub struct Vector2<F> {
     pub x: F,
     pub y: F,
 }
 
+#[derive(Default, Copy, Clone, Debug)]
 pub struct Vector3<F> {
     pub x: F,
     pub y: F,
@@ -25,10 +27,10 @@ impl<F> Vector2<F> {
     {
         lazy_static! {
                 static ref VECTOR2_PYTHON_REGEX: Regex =
-                    Regex::new(r"^\((-?\d+), (-?\d+)\)$").unwrap();
+                    Regex::new(r"^\(([-+]?([0-9]*[.])?[0-9]+([eE][-+]?\d+)?), ([-+]?([0-9]*[.])?[0-9]+([eE][-+]?\d+)?)\)$").unwrap();
             }
         let captured = VECTOR2_PYTHON_REGEX.captures(data.as_ref())
-            .ok_or(Error::new("Failed to parse the python vector"))?;
+            .ok_or(Error::new(format!("Failed to parse the python vector from {}", data.as_ref())))?;
 
         let x = captured[1].parse::<F>().into_error("can't parse x")?;
         let y = captured[2].parse::<F>().into_error("can't parse y")?;
